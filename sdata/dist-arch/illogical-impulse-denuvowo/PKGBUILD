@@ -3,7 +3,7 @@ _pkgname=cpuid_fault_emulation
 pkgname=illogical-impulse-denuvowo
 pkgver=0.1
 pkgrel=1
-pkgdesc='cpuid_fault_emulation DKMS kernel module for illogical-impulse'
+pkgdesc='cpuid_fault_emulation DKMS kernel module and DenuvOwO helper for illogical-impulse'
 arch=(x86_64)
 license=(None)
 depends=(
@@ -12,21 +12,39 @@ depends=(
   make
   gcc
   binutils # provides ld
+  sudo
+  kmod # provides modprobe
 )
 makedepends=(
   unzip
+  sudo # provides visudo for sudoers validation
 )
 install="$pkgname.install"
+backup=(
+  'etc/sudoers.d/21-denuvowo'
+)
 source=(
   "$_pkgname.zip"
+  'denuvowo.sh'
+  '21-denuvowo'
 )
 sha256sums=(
   'dcc470f95b585769bcc77df9cb8e8af0ee61809e7dd91c83c982692771870dba'
+  '833dac929f656238399a9ed8fc1ad3b9688aa73058be1c841fea70eb0990fe34'
+  '04d8a47c1734b33a36b94776a04e209d90bd032d24d22eb36a74887c85a9e7f0'
 )
+
+check() {
+  bash -n "$srcdir/denuvowo.sh"
+  visudo -cf "$srcdir/21-denuvowo"
+}
 
 package() {
   local dkmsdir="$pkgdir/usr/src/$_pkgname-$pkgver"
 
   install -d "$dkmsdir"
   cp -r "$srcdir/dkms.conf" "$srcdir/Makefile" "$srcdir/inc" "$srcdir/src" "$dkmsdir/"
+
+  install -Dm755 "$srcdir/denuvowo.sh" "$pkgdir/usr/local/bin/denuvowo"
+  install -Dm440 "$srcdir/21-denuvowo" "$pkgdir/etc/sudoers.d/21-denuvowo"
 }
