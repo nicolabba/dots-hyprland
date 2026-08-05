@@ -1,0 +1,32 @@
+groups=(illogical-impulse)
+_pkgname=cpuid_fault_emulation
+pkgname=illogical-impulse-denuvowo
+pkgver=0.1
+pkgrel=1
+pkgdesc='cpuid_fault_emulation DKMS kernel module for illogical-impulse'
+arch=(x86_64)
+license=(None)
+depends=(
+  dkms
+  linux-headers
+  make
+  gcc
+  binutils # provides ld
+)
+makedepends=(
+  unzip
+)
+install="$pkgname.install"
+source=(
+  "$_pkgname.zip"
+)
+sha256sums=(
+  'dcc470f95b585769bcc77df9cb8e8af0ee61809e7dd91c83c982692771870dba'
+)
+
+package() {
+  local dkmsdir="$pkgdir/usr/src/$_pkgname-$pkgver"
+
+  install -d "$dkmsdir"
+  cp -r "$srcdir/dkms.conf" "$srcdir/Makefile" "$srcdir/inc" "$srcdir/src" "$dkmsdir/"
+}

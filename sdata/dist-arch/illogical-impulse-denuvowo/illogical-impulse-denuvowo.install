@@ -1,0 +1,23 @@
+_dkms_remove() {
+  dkms remove cpuid_fault_emulation/0.1 --all --force 2>/dev/null || true
+}
+
+post_install() {
+  cd /usr/src/cpuid_fault_emulation-0.1 || exit 1
+
+  dkms add .
+  dkms build cpuid_fault_emulation/0.1 --force
+  dkms install cpuid_fault_emulation/0.1 --force
+}
+
+pre_upgrade() {
+  _dkms_remove
+}
+
+post_upgrade() {
+  post_install
+}
+
+pre_remove() {
+  _dkms_remove
+}

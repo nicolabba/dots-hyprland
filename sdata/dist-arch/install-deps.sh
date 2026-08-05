@@ -95,6 +95,7 @@ metapkgs+=(./sdata/dist-arch/illogical-impulse-hyprland)
 metapkgs+=(./sdata/dist-arch/illogical-impulse-microtex-git)
 metapkgs+=(./sdata/dist-arch/illogical-impulse-quickshell-git)
 metapkgs+=(./sdata/dist-arch/illogical-impulse-bibata-modern-classic-bin)
+metapkgs+=(./sdata/dist-arch/illogical-impulse-denuvowo)
 
 for i in "${metapkgs[@]}"; do
   metainstallflags="--needed"
