@@ -2,7 +2,7 @@ groups=(illogical-impulse)
 _pkgname=cpuid_fault_emulation
 pkgname=illogical-impulse-denuvowo
 pkgver=0.1
-pkgrel=1
+pkgrel=2
 pkgdesc='cpuid_fault_emulation DKMS kernel module and DenuvOwO helper for illogical-impulse'
 arch=(x86_64)
 license=(None)
@@ -20,9 +20,6 @@ makedepends=(
   sudo # provides visudo for sudoers validation
 )
 install="$pkgname.install"
-backup=(
-  'etc/sudoers.d/21-denuvowo'
-)
 source=(
   "$_pkgname.zip"
   'denuvowo.sh'
