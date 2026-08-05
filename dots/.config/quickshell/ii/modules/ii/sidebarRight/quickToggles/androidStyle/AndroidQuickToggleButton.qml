@@ -27,6 +27,8 @@ GroupButton {
     property string statusText: (toggleModel?.hasStatusText) ? (toggleModel?.statusText || (toggled ? Translation.tr("On") : Translation.tr("Off"))) : ""
     property string tooltipText: toggleModel?.tooltipText ?? ""
     property string buttonIcon: toggleModel?.icon ?? "close"
+    property bool buttonIconIsText: false
+    property real textIconSize: root.expandedSize ? 16 : 18
     property bool available: toggleModel?.available ?? true
     toggled: toggleModel?.toggled ?? false
     property var mainAction: toggleModel?.mainAction ?? null
@@ -116,12 +118,38 @@ GroupButton {
                     animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this)
                 }
 
-                MaterialSymbol {
+                Loader {
                     anchors.centerIn: parent
-                    fill: root.toggled ? 1 : 0
-                    iconSize: root.expandedSize ? 22 : 24
-                    color: root.colIcon
-                    text: root.buttonIcon
+                    sourceComponent: root.buttonIconIsText ? textIconComponent : materialIconComponent
+                }
+
+                Component {
+                    id: materialIconComponent
+
+                    MaterialSymbol {
+                        fill: root.toggled ? 1 : 0
+                        iconSize: root.expandedSize ? 22 : 24
+                        color: root.colIcon
+                        text: root.buttonIcon
+                    }
+                }
+
+                Component {
+                    id: textIconComponent
+
+                    StyledText {
+                        text: root.buttonIcon
+                        color: root.colIcon
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        font {
+                            family: Appearance.font.family.main
+                            pixelSize: root.textIconSize
+                            weight: Font.DemiBold
+                            letterSpacing: -1
+                            variableAxes: Appearance.font.variableAxes.main
+                        }
+                    }
                 }
 
                 // State layer
