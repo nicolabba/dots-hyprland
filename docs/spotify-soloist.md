@@ -60,6 +60,12 @@ systemctl --user disable --now ii-soloist-update.timer ii-soloist.service
 
 Stop an already-running update job separately with `systemctl --user stop ii-soloist-update.service` if necessary. Disabling preserves credentials, paired data and caches. Runtime binaries/caches and API keys are never part of this repository.
 
+## Web API authorization for library/search
+
+Create your own Web API app in Spotify Developer Dashboard and register `http://127.0.0.1:43821/callback`. Save its public Client ID in `~/.config/spotify-sidebar/client-id` (not the client secret). Run `ii-spotify-api authorize`, or use Connect Library in the sidebar. The helper opens a browser only for authorization, binds the callback to loopback, validates PKCE/state, and stores OAuth tokens privately in `~/.config/spotify-sidebar/web-api-tokens.json`. These credentials are separate from the Soloist key and paired session. It requests read-only library and playlist scopes; local playback works without this authorization.
+
+`ii-spotify-api status` reports authorization status without displaying tokens. Library/search results are read through the official Web API, with bounded requests, token refresh and persisted rate-limit cooldown. Spotify may restrict playlist items or developer-mode access; such failures are displayed rather than replaced with fabricated content. Changing the Client ID requires reauthorization.
+
 ## Verification
 
 ```sh
