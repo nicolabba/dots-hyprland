@@ -8,6 +8,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from datetime import datetime, timezone
+import io
+import tarfile
+import fcntl
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'dots/.local/bin/ii-soloist'
@@ -16,6 +21,7 @@ SCRIPT = ROOT / 'dots/.local/bin/ii-soloist'
 def module():
     loader = importlib.machinery.SourceFileLoader('ii_soloist', str(SCRIPT))
     spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
     m = importlib.util.module_from_spec(spec)
     sys.modules[loader.name] = m
     loader.exec_module(m)
