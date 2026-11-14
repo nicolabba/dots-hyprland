@@ -55,6 +55,27 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(marker.read_text(), 'preserve')
             self.assertTrue((home / '.config/systemd/user/ii-soloist-update.timer').exists())
 
+    def test_sidebar_deployment_backs_up_live_files_and_preserves_config(self):
+        m = module()
+        self.assertTrue(hasattr(m, 'deploy_sidebar'), 'Sidebar deployment missing')
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            config = home / '.config/illogical-impulse/config.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('{"policies":{"weeb":2},"sidebar":{"translator":{"enable":true}}}')
+            target = home / '.config/quickshell/ii/modules/common/Config.qml'
+            target.parent.mkdir(parents=True)
+            target.write_text('original-live-config')
+            backup = m.deploy_sidebar(home, ROOT / 'dots')
+            self.assertEqual((backup / '.config/quickshell/ii/modules/common/Config.qml').read_text(), 'original-live-config')
+            settings = __import__('json').loads(config.read_text())
+            self.assertEqual(settings['policies']['weeb'], 2)
+            self.assertTrue(settings['sidebar']['translator']['enable'])
+            self.assertTrue(settings['sidebar']['spotify']['enable'])
+            self.assertTrue((home / '.local/bin/ii-spotify-api').exists())
+            self.assertTrue((home / '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyConnection.qml').exists())
+            m.deploy_sidebar(home, ROOT / 'dots')
+
     def test_safe_setup_rejects_unmanaged_running_player(self):
         m = module()
         self.assertTrue(hasattr(m, 'ensure_no_unmanaged_daemon'), 'Safe migration check missing')

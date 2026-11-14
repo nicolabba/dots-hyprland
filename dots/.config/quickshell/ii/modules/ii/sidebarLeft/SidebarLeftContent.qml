@@ -6,6 +6,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Qt5Compat.GraphicalEffects
 import Qt.labs.synchronizer
+import "spotify/SpotifyLogic.js" as SpotifyLogic
 
 Item {
     id: root
@@ -16,11 +17,14 @@ Item {
     property bool translatorEnabled: Config.options.sidebar.translator.enable
     property bool animeEnabled: Config.options.policies.weeb !== 0
     property bool animeCloset: Config.options.policies.weeb === 2
-    property var tabButtonList: [
-        ...(root.aiChatEnabled ? [{"icon": "neurology", "name": Translation.tr("Intelligence")}] : []),
-        ...(root.translatorEnabled ? [{"icon": "translate", "name": Translation.tr("Translator")}] : []),
-        ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
-    ]
+    property bool spotifyEnabled: Config.options.sidebar.spotify.enable
+    property var tabKeys: SpotifyLogic.tabKeys(aiChatEnabled, translatorEnabled, animeEnabled, animeCloset, spotifyEnabled)
+    property var tabButtonList: tabKeys.map(key => ({
+        ai: {icon: "neurology", name: Translation.tr("Intelligence")},
+        translator: {icon: "translate", name: Translation.tr("Translator")},
+        anime: {icon: "bookmark_heart", name: Translation.tr("Anime")},
+        spotify: {icon: "music_note", name: "Spotify"}
+    })[key])
     property int tabCount: swipeView.count
 
     function focusActiveItem() {
@@ -48,7 +52,7 @@ Item {
         spacing: sidebarPadding
 
         Toolbar {
-            visible: tabButtonList.length > 0
+            visible: tabButtonList.length > 1
             Layout.alignment: Qt.AlignHCenter
             enableShadow: false
             ToolbarTabBar {
@@ -83,12 +87,8 @@ Item {
                     }
                 }
 
-                contentChildren: [
-                    ...(root.aiChatEnabled ? [aiChat.createObject()] : []),
-                    ...(root.translatorEnabled ? [translator.createObject()] : []),
-                    ...((root.tabButtonList.length === 0 || (!root.aiChatEnabled && !root.translatorEnabled && root.animeCloset)) ? [placeholder.createObject()] : []),
-                    ...(root.animeEnabled ? [anime.createObject()] : []),
-                ]
+                contentChildren: SpotifyLogic.pageKeys(root.aiChatEnabled, root.translatorEnabled, root.animeEnabled, root.animeCloset, root.spotifyEnabled)
+                    .map(key => ({ai: aiChat, translator: translator, anime: anime, spotify: spotify, placeholder: placeholder})[key].createObject(swipeView))
             }
         }
 
@@ -103,6 +103,14 @@ Item {
         Component {
             id: anime
             Anime {}
+        }
+        Component {
+            id: spotify
+            Loader {
+                source: "Spotify.qml"
+                active: root.spotifyEnabled
+                onActiveFocusChanged: if (activeFocus && item) item.forceActiveFocus()
+            }
         }
         Component {
             id: placeholder

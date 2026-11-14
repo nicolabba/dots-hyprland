@@ -286,6 +286,51 @@ def deploy(home: Path, source: Path):
             os.replace(tmp, dst)
 
 
+def deploy_sidebar(home: Path, source: Path):
+    """Explicitly install the native tab, with private backups and preserved settings."""
+    config = home / '.config/illogical-impulse/config.json'
+    try:
+        settings = json.loads(config.read_text()) if config.exists() else {}
+        if not isinstance(settings, dict) or not isinstance(settings.get('sidebar', {}), dict):
+            raise ValueError('Invalid settings structure')
+    except (OSError, ValueError):
+        raise BackendError('Cannot safely read shell settings; sidebar deployment refused') from None
+    files = [
+        '.local/bin/ii-spotify-api',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyLogic.js',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyConnection.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/Spotify.qml',
+        '.config/quickshell/ii/modules/common/Config.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/SidebarLeftContent.qml',
+    ]
+    if any(not (source / name).is_file() for name in files):
+        raise BackendError('Run setup-sidebar from the complete feature checkout')
+    backups = home / '.local/state/spotify-sidebar/backups'
+    backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup = Path(tempfile.mkdtemp(prefix=datetime.now().strftime('%Y%m%d-%H%M%S-'), dir=backups))
+    if config.exists():
+        shutil.copy2(config, backup / 'config.json')
+        (backup / 'config.json').chmod(0o600)
+    for name in files:
+        src, dst = source / name, home / name
+        if src.resolve() == dst.resolve():
+            continue
+        if dst.exists():
+            saved = backup / name
+            saved.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(dst, saved)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as f:
+            temp = Path(f.name)
+            f.write(src.read_bytes())
+        temp.chmod(0o700 if name.startswith('.local/bin/') else 0o600)
+        os.replace(temp, dst)
+    settings.setdefault('sidebar', {}).setdefault('spotify', {})['enable'] = True
+    config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_json(config, settings)
+    return backup
+
+
 def ensure_no_unmanaged_daemon(p):
     pidfile = p['data'] / 'soloist.pid'
     if pidfile.exists():
@@ -323,7 +368,7 @@ def setup(home: Path, source: Path):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'update', 'setup', 'notify-failure'])
+    parser.add_argument('command', choices=['run', 'update', 'setup', 'setup-sidebar', 'notify-failure'])
     args = parser.parse_args()
     p = paths(Path.home())
     os.umask(0o077)
@@ -335,8 +380,11 @@ def main() -> int:
         if args.command == 'notify-failure':
             notify_result({'outcome': 'failed', 'reason': 'Soloist playback service failed; inspect journalctl --user -u ii-soloist.service'})
             return 0
-        if args.command == 'setup':
-            setup(Path.home(), Path(__file__).resolve().parents[2])
+        if args.command in ('setup', 'setup-sidebar'):
+            source = Path(__file__).resolve().parents[2]
+            setup(Path.home(), source)
+            if args.command == 'setup-sidebar':
+                print('Sidebar deployed; private backup:', deploy_sidebar(Path.home(), source))
             return 0
         argv = launch_arguments(p)
         os.execv(argv[0], argv)
