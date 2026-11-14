@@ -42,6 +42,12 @@ The widget control WebSocket listens on **127.0.0.1 only**, with a dynamic port 
 
 First-time pairing uses mDNS (`_spotify-connect._tcp`, UDP 5353) and the TCP port advertised in its TXT/SRV records (`CPath=/zc`). Use `avahi-browse -rtp _spotify-connect._tcp` to inspect it. That TCP port can change on restart. Permit only the required local-network sources/ports if needed; do not disable the firewall or copy a temporary test port into a permanent rule. No permanent firewall exception is installed. Stored pairing restored after reboot without additional rules in the feasibility test.
 
+## Boot-time network readiness
+
+The playback service runs `ii-soloist wait-network` before starting Soloist. It checks DNS/TLS reachability to Spotify's public token endpoint using a credential-free HEAD request, retrying for up to 60 seconds. It starts immediately when reachable; there is no fixed boot delay. If offline, the pre-start check fails and systemd's existing restart policy retries without deleting pairing state. The service start timeout bounds a stalled probe.
+
+This prevents an observed cold-boot race where Soloist attempted saved-session restoration before the wired connection was activated and then remained logged out. Restarting once networking was ready restored the existing session without re-pairing. A widget pairing prompt in this condition does not establish that credentials were lost. The gate and simulated offline/readiness transitions are tested; another real cold boot is required to confirm the corrected startup on this machine.
+
 ## Automatic build updates
 
 Official builds expire **90 days after their build timestamp**. The persistent user timer checks daily with up to 30 minutes randomized delay. It fetches https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz over HTTPS, rejects unsafe/oversized archive entries and non-official redirects, runs the staged executable's version check, and compares platform/build timestamps. Spotify does not provide a publisher signature in this flow; these checks are **not cryptographic publisher-signature verification**.
