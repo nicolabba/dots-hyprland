@@ -64,6 +64,10 @@ function allowed(s, command) {
     var key = command === "set_shuffle" ? "shuffle" : command.indexOf("set_repeat_") === 0 ? "set_repeat" : command;
     return Object.prototype.hasOwnProperty.call(object(s.actions), key);
 }
+function shouldFetchNext(s) {
+    return !!s.active && !!s.authorized && !s.busy && !s.blocked && s.next !== null && s.next !== undefined
+        && s.height > 0 && Math.max(0, s.contentY - (s.originY || 0)) + s.height + 180 >= s.contentHeight;
+}
 function formatTime(ms) {
     var seconds = Math.floor(Math.max(0, ms || 0) / 1000);
     return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");

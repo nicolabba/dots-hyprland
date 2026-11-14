@@ -59,6 +59,13 @@ s.actions={skip_next:{}};if(!allowed(s,'skip_next'))throw Error('Available actio
 if(!isCurrent(3,3)||isCurrent(2,3))throw Error('Stale search accepted'); console.log('ok');''')
         self.assertEqual(result,'ok')
 
+    def test_infinite_paging_waits_for_capacity_and_stops_on_errors(self):
+        result=self.evaluate('''const base={active:true,authorized:true,busy:false,blocked:false,next:10,contentY:600,originY:0,contentHeight:1000,height:300};
+if(!shouldFetchNext(base))throw Error('Near-end page not fetched');
+for(const change of [{active:false},{authorized:false},{busy:true},{blocked:true},{next:null},{height:0},{contentY:0}])if(shouldFetchNext(Object.assign({},base,change)))throw Error('Unexpected fetch '+JSON.stringify(change));
+if(!shouldFetchNext(Object.assign({},base,{contentY:0,contentHeight:100})))throw Error('Underfilled viewport not filled');console.log('ok');''')
+        self.assertEqual(result,'ok')
+
     def test_port_discovery_rejects_nonlocal_or_invalid_endpoints(self):
         result=self.evaluate('''if(endpoint('127.0.0.1','1234')!=='ws://127.0.0.1:1234')throw Error('Valid rejected');
 for(const [a,p] of [['0.0.0.0','1234'],['192.168.1.4','1234'],['127.0.0.1','0'],['127.0.0.1','65536'],['127.0.0.1','1234junk']])if(endpoint(a,p)!=='')throw Error('Unsafe endpoint');console.log('ok');''')
@@ -66,6 +73,43 @@ for(const [a,p] of [['0.0.0.0','1234'],['192.168.1.4','1234'],['127.0.0.1','0'],
 
 
 class QmlConnectionTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('qs'), 'Quickshell required')
+    def test_infinite_list_appends_without_resetting_scroll_or_repeating_page(self):
+        folder = BASE/'modules/ii/sidebarLeft/spotify'
+        self.assertTrue((folder/'PagedList.qml').exists(), 'Infinite list component missing')
+        with tempfile.TemporaryDirectory() as d:
+            source=Path(d)/'shell.qml'
+            source.write_text('''import QtQuick
+import Quickshell
+import "''' + folder.as_uri() + '''" as Test
+ShellRoot {
+ Item { width:300; height:200
+  Test.PagedList {
+   id:list; anchors.fill:parent; pagingActive:true; authorized:true; nextOffset:10
+   entries: Array.from({length:20},(_,i)=>({uri:String(i),title:String(i),subtitle:'',image:'',kind:'track'}))
+   delegate: Rectangle { width:300; height:50 }
+   property int requests:0
+   onFetchNext: requests++
+  }
+  Timer { interval:150; running:true; onTriggered:{ list.contentY=700; } }
+  Timer { interval:350; running:true; onTriggered:{
+    list.entries=Array.from({length:30},(_,i)=>({uri:String(i),title:String(i),subtitle:'',image:'',kind:'track'}));
+  } }
+  Timer { interval:650; running:true; onTriggered:{
+    if(list.count===30 && list.contentY>690 && list.requests===1) console.log('SPOTIFY_INFINITE_OK');
+    else console.log('SPOTIFY_INFINITE_BAD',list.count,list.contentY,list.requests);
+  } }
+ }
+}
+''')
+            proc=subprocess.Popen(['qs','-p',str(source),'--no-color'],env=dict(os.environ,QT_QPA_PLATFORM='offscreen'),stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            try:
+                output,_=proc.communicate(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                proc.terminate(); output,_=proc.communicate(timeout=5)
+            self.assertIn('SPOTIFY_INFINITE_OK',output,output)
+            self.assertNotIn('ERROR:',output,output)
+
     @unittest.skipUnless(shutil.which('qs'), 'Quickshell required')
     def test_actual_qml_connection_loads_and_reduces_events_offscreen(self):
         folder = BASE / 'modules/ii/sidebarLeft/spotify'

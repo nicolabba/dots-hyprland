@@ -55,7 +55,7 @@ Scope {
         state = Logic.reduce(state, event);
         clock = Date.now();
         if (event.type === "auth_state" && event.logged_in) {
-            send("get_state"); send("get_queue", {limit: 30});
+            send("get_state"); send("get_queue", {limit: 0});
         } else if (["track_changed", "playback_changed", "device_changed"].indexOf(event.type) >= 0 && loggedIn) {
             send("get_state");
         }

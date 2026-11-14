@@ -240,15 +240,21 @@ Item {
                 }
                 Chip { visible: !backend.authorized; Layout.fillWidth: true; buttonText: backend.authorizing ? "Waiting for Spotify authorization…" : "Connect library"; enabled: !backend.authorizing; onClicked: backend.authorize() }
                 StyledText { visible: !!backend.browseError; Layout.fillWidth: true; text: backend.browseError + (backend.retryAfter > 0 ? " Retry in " + backend.retryAfter + "s." : ""); wrapMode: Text.WordWrap; font.pixelSize: 13; color: Appearance.colors.colSubtext }
-                ListView {
+                Backend.PagedList {
                     id: libraryList
+                    objectName: "spotifyLibraryList"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true; spacing: 4
-                    model: backend.results
-                    delegate: TrackRow { required property var modelData; width: libraryList.width; entry: modelData; browsing: true }
+                    entries: backend.results
+                    pagingActive: root.visible && root.viewIndex === 2 && !searchDelay.running
+                    authorized: backend.authorized
+                    busy: backend.busy
+                    blocked: !!backend.browseError || backend.retryAfter > 0
+                    nextOffset: backend.nextOffset
+                    onFetchNext: root.loadCurrent(backend.nextOffset, true)
+                    delegate: TrackRow { required property var model; width: libraryList.width; entry: model; browsing: true }
                     ScrollBar.vertical: ScrollBar {}
-                    footer: Chip { width: libraryList.width; visible: backend.nextOffset !== null; buttonText: backend.busy ? "Loading…" : "Load more"; enabled: !backend.busy && backend.retryAfter <= 0; onClicked: root.loadCurrent(backend.nextOffset, true) }
                     StyledText { anchors.centerIn: parent; visible: !backend.busy && backend.authorized && !backend.results.length && !backend.browseError; text: "No items found"; color: Appearance.colors.colSubtext }
                 }
                 RowLayout {
