@@ -1,7 +1,7 @@
 # Spotify Soloist persistent backend
 
 ## Intent and scope
-Provide windowless Spotify playback for a future native left-sidebar Quickshell widget. This milestone makes the already-tested Soloist backend persistent and keeps its expiring official binary updated. Widget UI, library/search integration, and Web API OAuth are separate follow-up work.
+Deliver the whole native Spotify left-sidebar integration on feature/spotify-sidebar, styled and integrated like the existing AI/Anime tabs, with Spotify-only controls, queue, library, playlists and search. This design covers the first milestone: making the already-tested windowless Soloist backend persistent and keeping its expiring official binary updated. Widget UI, library/search integration and Web API OAuth are subsequent milestones on this same feature branch, not separate feature branches. Backend completion alone does not complete the feature.
 
 ## Approved approach
 User approved a systemd user service and daily update timer. Alternatives discussed were manual updates (risk of 90-day expiry) and tying playback to Quickshell (unnecessary lifecycle coupling). All source belongs in nicolabba/dots-hyprland on a feature branch; no remote push is implied.

@@ -11,7 +11,7 @@
 **Spec:** docs/superpowers/specs/2026-11-14-spotify-soloist-backend-design.md
 
 ## Global Constraints
-- Branch: feature/spotify-soloist-backend in nicolabba/dots-hyprland. Do not push without instruction.
+- Branch: feature/spotify-sidebar in nicolabba/dots-hyprland. This branch delivers the whole native Spotify sidebar: persistent Soloist backend, native Quickshell tab, Spotify-only playback/queue controls, and library/playlists/search integration. This document covers the first backend milestone only; subsequent milestones stay on this same feature branch. Do not push without instruction.
 - Preserve ~/.local/share/spotify-sidebar/soloist-data and ~/.config/spotify-sidebar/soloist-api-key.
 - No automatic music playback, visible window, root service or firewall changes.
 - WebSocket bind: 127.0.0.1:0. Cache: ~/.cache/spotify-sidebar/soloist, 256 MB. Initial volume: 25.
