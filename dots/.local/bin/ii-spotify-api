@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""Read-only Spotify browsing and private OAuth PKCE for the native sidebar."""
+import argparse
+import base64
+import fcntl
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+REDIRECT = 'http://127.0.0.1:43821/callback'
+SCOPES = 'user-library-read playlist-read-private playlist-read-collaborative'
+
+
+class ApiError(Exception):
+    def __init__(self, message, kind='error', retry_after=None):
+        super().__init__(message)
+        self.kind = kind
+        self.retry_after = retry_after
+
+    def result(self):
+        result = {'error': str(self), 'kind': self.kind}
+        if self.retry_after is not None:
+            result['retry_after'] = self.retry_after
+        return result
+
+
+def private_json(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
+        temp = Path(f.name)
+        try:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            raise
+    os.replace(temp, path)
+
+
+def authorization_request(client_id):
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
+    state = secrets.token_urlsafe(32)
+    query = urllib.parse.urlencode({'client_id':client_id, 'response_type':'code',
+            'redirect_uri':REDIRECT, 'scope':SCOPES, 'state':state,
+            'code_challenge_method':'S256', 'code_challenge':challenge})
+    return verifier, 'https://accounts.spotify.com/authorize?' + query, state
+
+
+def callback_code(target, state):
+    u = urllib.parse.urlsplit(target)
+    params = urllib.parse.parse_qs(u.query, keep_blank_values=True)
+    if u.path != '/callback' or params.get('state') != [state]:
+        raise ApiError('Invalid authorization callback', 'authorization')
+    if 'error' in params:
+        raise ApiError('Spotify authorization was declined', 'authorization')
+    code = params.get('code', [])
+    if len(code) != 1 or not code[0]:
+        raise ApiError('Authorization callback has no valid code', 'authorization')
+    return code[0]
+
+
+class CallbackServer(http.server.HTTPServer):
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(3)
+        return connection, address
+
+
+def normalize(item):
+    if not isinstance(item, dict):
+        return None
+    if any(k in item for k in ('item','track','album')) and 'uri' not in item:
+        item = item.get('item') or item.get('track') or item.get('album')
+    if not isinstance(item, dict) or not re.fullmatch(r'spotify:(track|album|playlist|episode):[A-Za-z0-9]+', item.get('uri','')):
+        return None
+    artists = ', '.join(a.get('name','') for a in item.get('artists',[]) if isinstance(a,dict))
+    images = item.get('images') or (item.get('album') or {}).get('images') or []
+    image = next((i.get('url','') for i in images if isinstance(i,dict) and i.get('url','').startswith('https://i.scdn.co/')), '')
+    return {'uri':item['uri'], 'title':item.get('name') or 'Unavailable item',
+            'subtitle':artists or (item.get('owner') or {}).get('display_name') or '',
+            'image':image, 'kind':item.get('type') or item['uri'].split(':')[1]}
+
+
+class Api:
+    def __init__(self, home):
+        self.folder = home / '.config/spotify-sidebar'
+        try:
+            self.client_id = (self.folder / 'client-id').read_text().strip()
+        except OSError:
+            raise ApiError('Save a Spotify Web API Client ID in ~/.config/spotify-sidebar/client-id', 'setup') from None
+        if not re.fullmatch('[a-fA-F0-9]{32}', self.client_id):
+            raise ApiError('The Spotify Web API Client ID has an invalid format', 'setup')
+        self.token_path = self.folder / 'web-api-tokens.json'
+        self.cooldown_path = self.folder / 'web-api-cooldown.json'
+
+    def tokens(self):
+        try:
+            st = self.token_path.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+                raise ApiError('Token file must be owned by you with permissions 0600', 'authorization')
+            data = json.loads(self.token_path.read_text())
+            if not isinstance(data,dict) or data.get('client_id') != self.client_id:
+                return {}
+            return data
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def write_tokens(self, data):
+        private_json(self.token_path, dict(data, client_id=self.client_id))
+
+    def store_tokens(self, response, previous=None):
+        previous = previous or {}
+        if not isinstance(response.get('access_token'),str) or not response['access_token']:
+            raise ApiError('Spotify did not return a valid access token', 'authorization')
+        refresh = response.get('refresh_token') or previous.get('refresh_token')
+        if not isinstance(refresh,str) or not refresh:
+            raise ApiError('Spotify did not return a refresh token', 'authorization')
+        self.write_tokens({'access_token':response['access_token'], 'refresh_token':refresh,
+            'expires_at':time.time()+int(response.get('expires_in',3600)), 'scope':response.get('scope',previous.get('scope',SCOPES))})
+
+    def http(self, url, data=None, token=None):
+        # Both endpoints are fixed by this helper. Refuse redirects so bearer credentials cannot follow them.
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args):
+                return None
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != 'https' or parts.hostname not in ('accounts.spotify.com','api.spotify.com'):
+            raise ApiError('Rejected unexpected Spotify API endpoint')
+        headers = {'Accept':'application/json'}
+        payload = None
+        if data is not None:
+            payload = urllib.parse.urlencode(data).encode()
+            headers['Content-Type'] = 'application/x-www-form-urlencoded'
+        if token:
+            headers['Authorization'] = 'Bearer ' + token
+        request = urllib.request.Request(url, data=payload, headers=headers)
+        with urllib.request.build_opener(NoRedirect()).open(request,timeout=15) as response:
+            content = response.read(4 * 1024 * 1024 + 1)
+            if len(content) > 4 * 1024 * 1024:
+                raise ApiError('Spotify response is too large')
+            return json.loads(content)
+
+    def check_cooldown(self):
+        try:
+            data=json.loads(self.cooldown_path.read_text())
+            remaining=data.get('until',0)-time.time()
+        except (OSError,ValueError,AttributeError,TypeError):
+            return
+        if remaining>0:
+            kind=data.get('kind','rate_limit')
+            message='Spotify is temporarily unavailable; try again later' if kind=='temporary' else 'Spotify is rate limiting requests; try again later'
+            raise ApiError(message,kind,max(1,int(remaining)))
+
+    def retry_error(self,error,kind='rate_limit'):
+        try:
+            delay=max(1,min(86400,int(error.headers.get('Retry-After','60'))))
+        except (ValueError,TypeError):
+            delay=60
+        private_json(self.cooldown_path,{'until':time.time()+delay,'kind':kind})
+        message='Spotify is temporarily unavailable; try again later' if kind=='temporary' else 'Spotify is rate limiting requests; try again later'
+        return ApiError(message,kind,delay)
+
+    def refresh_error(self,error):
+        if error.code==429:
+            return self.retry_error(error)
+        if 500<=error.code<600:
+            if error.headers.get('Retry-After'):
+                return self.retry_error(error,'temporary')
+            return ApiError('Spotify is temporarily unavailable; your library connection is retained', 'temporary')
+        code=''
+        if error.code==400:
+            try:
+                code=json.loads(error.read(4096)).get('error','')
+            except (ValueError,AttributeError):
+                pass
+        if error.code==401 or code in ('invalid_grant','invalid_client','unauthorized_client'):
+            return ApiError('Spotify authorization expired or was revoked; connect again', 'authorization')
+        return ApiError('Spotify could not refresh access; check application permissions and retry', 'permission' if error.code==403 else 'api')
+
+    def access_token(self, force=False):
+        self.check_cooldown()
+        self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with (self.folder / 'web-api.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.check_cooldown()
+            old = self.tokens()
+            if not old.get('refresh_token'):
+                raise ApiError('Connect your Spotify library first', 'authorization')
+            if not force and old.get('access_token') and old.get('expires_at',0) > time.time()+60:
+                return old['access_token']
+            try:
+                response = self.http('https://accounts.spotify.com/api/token', data={
+                    'grant_type':'refresh_token', 'refresh_token':old['refresh_token'], 'client_id':self.client_id})
+                self.store_tokens(response,old)
+                return response['access_token']
+            except urllib.error.HTTPError as error:
+                try:
+                    failure=self.refresh_error(error)
+                finally:
+                    error.close()
+                raise failure from None
+
+    def status(self):
+        tokens = self.tokens()
+        return {'authenticated':bool(tokens.get('refresh_token')), 'client_id_present':True}
+
+    def authorize(self):
+        verifier, url, state = authorization_request(self.client_id)
+        owner = self
+        result = {}
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args):
+                pass
+            def do_GET(self):
+                try:
+                    code = callback_code(self.path,state)
+                    response = owner.http('https://accounts.spotify.com/api/token',data={
+                        'grant_type':'authorization_code','code':code,'redirect_uri':REDIRECT,
+                        'client_id':owner.client_id,'code_verifier':verifier})
+                    owner.store_tokens(response)
+                    result['authenticated'] = True
+                    self.send_response(200)
+                    message = b'Spotify library connected. You can close this tab.'
+                except ApiError as e:
+                    self.send_response(400)
+                    message = b'Authorization failed. Return to the sidebar and try again.'
+                    # Forged state/path must not terminate the real authorization attempt.
+                    params = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    if params.get('state') == [state] and 'error' in params:
+                        result['error'] = e
+                except Exception:
+                    self.send_response(502)
+                    message = b'Spotify authorization exchange failed. Please try again.'
+                    result['error'] = ApiError('Spotify authorization exchange failed', 'authorization')
+                self.send_header('Content-Type','text/plain; charset=utf-8')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Content-Length',str(len(message)))
+                self.end_headers()
+                self.wfile.write(message)
+        try:
+            with CallbackServer(('127.0.0.1',43821),Handler) as server:
+                server.timeout = 0.5
+                subprocess.Popen(['xdg-open',url], stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                deadline = time.monotonic()+300
+                while not result and time.monotonic()<deadline:
+                    try:
+                        server.handle_request()
+                    except (socket.timeout,BrokenPipeError,ConnectionResetError):
+                        pass
+        except OSError:
+            raise ApiError('Cannot open authorization callback or browser; check port 43821', 'authorization') from None
+        if result.get('authenticated'):
+            return {'authenticated':True}
+        raise result.get('error') or ApiError('Spotify authorization timed out', 'authorization')
+
+    def get(self,path,params):
+        self.check_cooldown()
+        url = 'https://api.spotify.com/v1/' + path + '?' + urllib.parse.urlencode(params)
+        for attempt in range(2):
+            token = self.access_token(force=attempt>0)
+            try:
+                return self.http(url,token=token)
+            except urllib.error.HTTPError as e:
+                e.close()
+                if e.code==401 and attempt==0:
+                    continue
+                if e.code==401:
+                    raise ApiError('Spotify authorization was rejected; connect again', 'authorization') from None
+                if e.code==403:
+                    raise ApiError('Spotify denied this request. Check app access, allowed users and library permissions.', 'permission') from None
+                if e.code==429:
+                    raise self.retry_error(e) from None
+                raise ApiError('Spotify could not provide these items', 'api') from None
+        raise ApiError('Spotify authorization failed', 'authorization')
+
+    def browse(self,operation,kind='tracks',query='',entity_id='',offset=0):
+        if offset<0 or offset>100000:
+            raise ApiError('Invalid page offset')
+        params={'limit':10,'offset':offset}
+        if operation=='library':
+            if kind not in ('tracks','albums','playlists'):
+                raise ApiError('Invalid library category')
+            path='me/'+kind
+        elif operation=='search':
+            if not query.strip():
+                return {'items':[], 'next_offset':None}
+            if len(query)>250 or offset>1000:
+                raise ApiError('Search query or offset exceeds Spotify limits')
+            path='search'
+            params.update(q=query,type='track,album,playlist')
+        elif operation in ('playlist','album'):
+            if not re.fullmatch('[A-Za-z0-9]{22}',entity_id):
+                raise ApiError('Invalid Spotify entity ID')
+            path=('playlists/'+entity_id+'/items') if operation=='playlist' else ('albums/'+entity_id+'/tracks')
+        else:
+            raise ApiError('Unknown browsing operation')
+        data=self.get(path,params)
+        pages=[data.get(k,{}) for k in ('tracks','albums','playlists')] if operation=='search' else [data]
+        items=[]
+        more=False
+        for page in pages:
+            if not isinstance(page,dict):
+                continue
+            for raw in page.get('items') or []:
+                item=normalize(raw)
+                if item:
+                    items.append(item)
+            more=more or bool(page.get('next'))
+        return {'items':items,'next_offset':offset+10 if more else None}
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('operation',choices=['status','authorize','library','search','playlist','album'])
+    parser.add_argument('--kind',default='tracks')
+    parser.add_argument('--query',default='')
+    parser.add_argument('--id',default='')
+    parser.add_argument('--offset',type=int,default=0)
+    args=parser.parse_args()
+    os.umask(0o077)
+    try:
+        api=Api(Path.home())
+        if args.operation=='status':
+            result=api.status()
+        elif args.operation=='authorize':
+            result=api.authorize()
+        else:
+            result=api.browse(args.operation,kind=args.kind,query=args.query,entity_id=args.id,offset=args.offset)
+        print(json.dumps(result))
+        return 0
+    except ApiError as e:
+        print(json.dumps(e.result()))
+    except Exception:
+        # Transport/parser exceptions may include tokens or callback queries.
+        print(json.dumps({'error':'Spotify request failed. Check your connection and retry.','kind':'network'}))
+    return 1
+
+
+if __name__=='__main__':
+    sys.exit(main())

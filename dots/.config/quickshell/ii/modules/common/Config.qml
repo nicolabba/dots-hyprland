@@ -496,6 +496,9 @@ Singleton {
             }
 
             property JsonObject sidebar: JsonObject {
+                property JsonObject spotify: JsonObject {
+                    property bool enable: false
+                }
                 property bool keepRightSidebarLoaded: true
                 property JsonObject translator: JsonObject {
                     property bool enable: false

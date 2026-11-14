@@ -1,0 +1,8 @@
+[Unit]
+Description=Notify about Spotify Sidebar playback failure
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ii-soloist notify-failure
+TimeoutStartSec=10
+NoNewPrivileges=true

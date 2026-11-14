@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Private, user-local Spotify Soloist launcher and updater."""
+import argparse
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
+import json
+import math
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import time
+import urllib.request
+from urllib.parse import urlsplit
+import os
+from pathlib import Path
+import stat
+import sys
+
+
+class BackendError(Exception):
+    """Safe user-facing error: never include keys or secret-bearing argv."""
+
+
+def paths(home: Path) -> dict[str, Path]:
+    root = home / '.local/share/spotify-sidebar'
+    return {
+        'root': root,
+        'binary': root / 'soloist/soloist',
+        'previous': root / 'soloist/soloist.previous',
+        'data': root / 'soloist-data',
+        'cache': home / '.cache/spotify-sidebar/soloist',
+        'key': home / '.config/spotify-sidebar/soloist-api-key',
+        'status': root / 'update-status.json',
+        'lock': root / 'update.lock',
+    }
+
+
+def launch_arguments(p: dict[str, Path]) -> list[str]:
+    try:
+        st = p['key'].lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o600:
+            raise BackendError('API key file must be owned by you with permissions 0600')
+        key = p['key'].read_text().strip()
+    except OSError:
+        raise BackendError('Cannot read the private Soloist API key file') from None
+    if not key or any(c.isspace() for c in key):
+        raise BackendError('API key file must contain one nonempty token')
+    return [str(p['binary']), '--device-name', 'Sidebar Spotify', '--api-key', key,
+            '--data-dir', str(p['data']), '--cache-dir', str(p['cache']),
+            '--cache-size', '256', '--initial-volume', '25', '--ws', '127.0.0.1:0']
+
+
+URL = 'https://soloist-builds.spotifycdn.com/soloist_release_x86_64.tar.gz'
+MAX_BINARY = 128 * 1024 * 1024
+LIFETIME = 90 * 86400
+SERVICE = 'ii-soloist.service'
+
+
+@dataclass(frozen=True)
+class Build:
+    version: str
+    timestamp: int
+
+
+def parse_build(text: str) -> Build:
+    match = re.fullmatch(r'soloist ([0-9]+(?:\.[0-9]+)+) build ([0-9]+) .*\(linux/x86_64\)\s*', text.strip())
+    if not match:
+        raise BackendError('Invalid Soloist version or unsupported platform')
+    return Build(match[1], int(match[2]))
+
+
+def command(argv: list[str], timeout=10) -> str:
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=True)
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        raise BackendError('External command failed or timed out') from None
+
+
+def read_build(binary: Path) -> Build:
+    return parse_build(command([str(binary), '--version']))
+
+
+def eligible(candidate: Build, current: Build | None, now: datetime) -> bool:
+    age = now.timestamp() - candidate.timestamp
+    if age < 0 or age >= LIFETIME:
+        raise BackendError('Candidate build is future-dated or expired')
+    return current is None or candidate.timestamp > current.timestamp
+
+
+def playback_state(binary: Path, data: Path) -> str:
+    try:
+        d = json.loads(command([str(binary), 'ctl', 'now', '--json', '--data-dir', str(data)]))
+        state = d.get('status')
+        return state if state in ('playing', 'paused', 'stopped') else 'unknown'
+    except (BackendError, ValueError, AttributeError):
+        return 'unknown'
+
+
+class Service:
+    def __init__(self, p):
+        self.p = p
+
+    def active(self):
+        # Unknown systemd state must not be mistaken for an inactive service.
+        state = command(['systemctl', '--user', 'show', SERVICE, '--property=ActiveState', '--value'])
+        if state not in ('active', 'inactive', 'failed'):
+            raise BackendError('Service is transitioning; retry later')
+        return state == 'active'
+
+    def logged_in(self):
+        output = command([str(self.p['binary']), 'ctl', 'status', '--data-dir', str(self.p['data'])])
+        if 'logged in: yes' in output:
+            return True
+        if 'logged in: no' in output:
+            return False
+        raise BackendError('Cannot determine current authentication state')
+
+    def restart(self, require_login):
+        try:
+            # systemd checks activity atomically: never start a deliberately stopped unit.
+            command(['systemctl', '--user', 'try-restart', SERVICE], timeout=35)
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                try:
+                    output = command([str(self.p['binary']), 'ctl', 'status', '--data-dir', str(self.p['data'])], timeout=3)
+                    if self.active() and 'soloist: running' in output and (not require_login or 'logged in: yes' in output):
+                        return True
+                except BackendError:
+                    pass
+                time.sleep(0.5)
+        except BackendError:
+            pass
+        return False
+
+
+class OfficialRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        u = urlsplit(newurl)
+        if u.scheme != 'https' or u.hostname != 'soloist-builds.spotifycdn.com' or u.port not in (None, 443):
+            raise BackendError('Rejected non-official download redirect')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download(destination: Path):
+    opener = urllib.request.build_opener(OfficialRedirect())
+    deadline = time.monotonic() + 90
+    with opener.open(URL, timeout=15) as response, destination.open('wb') as f:
+        total = 0
+        while block := response.read(1024 * 1024):
+            total += len(block)
+            if total > MAX_BINARY or time.monotonic() > deadline:
+                raise BackendError('Download exceeded size or time limit')
+            f.write(block)
+
+
+def extract_binary(archive: Path, destination: Path):
+    # Never use extractall: reject unsafe members before executing any payload.
+    with tarfile.open(archive, 'r:gz') as t:
+        count = 0
+        size = 0
+        found = False
+        for member in t:
+            count += 1
+            size += member.size
+            if count > 16 or size > MAX_BINARY * 2 or member.size < 0 or member.size > MAX_BINARY:
+                raise BackendError('Archive exceeds allowed limits')
+            if member.name not in ('soloist', 'CHANGELOG.md', 'THIRD_PARTY_LICENSES.txt') or not member.isfile():
+                raise BackendError('Archive contains an unexpected or unsafe member')
+            if member.name == 'soloist':
+                if found:
+                    raise BackendError('Archive contains duplicate executables')
+                found = True
+                stream = t.extractfile(member)
+                if stream is None:
+                    raise BackendError('Executable missing from archive')
+                with stream, destination.open('xb') as target:
+                    shutil.copyfileobj(stream, target)
+        if not found:
+            raise BackendError('Archive contains no executable')
+    destination.chmod(0o700)
+
+
+def atomic_json(path: Path, value: dict):
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as f:
+        name = Path(f.name)
+        try:
+            json.dump(value, f)
+            f.flush()
+            os.fsync(f.fileno())
+        except BaseException:
+            name.unlink(missing_ok=True)
+            raise
+    os.replace(name, path)
+
+
+def update(p, fetch=download, service=None, now=None):
+    now = now or datetime.now(timezone.utc)
+    service = service or Service(p)
+    p['binary'].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    result = {'outcome': 'failed', 'checked_at': now.isoformat()}
+    stage = None
+    try:
+        with p['lock'].open('a') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return dict(result, outcome='deferred', reason='Another update is running')
+            current = read_build(p['binary']) if p['binary'].exists() else None
+            if current:
+                result['days_remaining'] = max(0, math.ceil((current.timestamp + LIFETIME - now.timestamp()) / 86400))
+            active = service.active()
+            if active and playback_state(p['binary'], p['data']) not in ('paused', 'stopped'):
+                result.update(outcome='deferred', reason='Playback active or unavailable')
+            else:
+                stage = tempfile.TemporaryDirectory(prefix='.update-', dir=p['binary'].parent)
+                folder = Path(stage.name)
+                archive = folder / 'download.tar.gz'
+                candidate = folder / 'soloist'
+                fetch(archive)
+                extract_binary(archive, candidate)
+                build = read_build(candidate)
+                if not eligible(build, current, now):
+                    result.update(outcome='unchanged', reason='No newer official build')
+                elif service.active() != active or (active and playback_state(p['binary'], p['data']) not in ('paused', 'stopped')):
+                    result.update(outcome='deferred', reason='Playback or service state changed during staging')
+                else:
+                    logged = service.logged_in() if active else False
+                    if current:
+                        # Stage the backup before the FINAL safety check: copying may block.
+                        shutil.copy2(p['binary'], folder / 'previous')
+                    if service.active() != active or (active and playback_state(p['binary'], p['data']) not in ('paused', 'stopped')):
+                        result.update(outcome='deferred', reason='Playback or service state changed during final preparation')
+                    else:
+                        if current:
+                            os.replace(folder / 'previous', p['previous'])
+                        os.replace(candidate, p['binary'])
+                        result.update(outcome='updated', reason='Installed newer official build', days_remaining=math.ceil((build.timestamp + LIFETIME - now.timestamp()) / 86400))
+                        if active and not service.restart(logged):
+                            if current and 0 <= now.timestamp() - current.timestamp < LIFETIME:
+                                shutil.copy2(p['previous'], folder / 'rollback')
+                                # Restore the on-disk binary without touching any running audio.
+                                os.replace(folder / 'rollback', p['binary'])
+                                recovery_safe = service.active() and playback_state(p['binary'], p['data']) in ('paused', 'stopped')
+                                if recovery_safe:
+                                    ok = service.restart(logged)
+                                    result.update(outcome='rolled_back' if ok else 'failed', reason='Candidate failed health check; previous restored' if ok else 'Candidate and rollback health checks failed')
+                                else:
+                                    result.update(outcome='rolled_back', reason='Previous binary restored; recovery restart deferred to preserve stopped service or playback')
+                                result['days_remaining'] = max(0, math.ceil((current.timestamp + LIFETIME - now.timestamp()) / 86400))
+                            else:
+                                result.update(outcome='failed', reason='Candidate failed health check; no unexpired rollback available')
+            atomic_json(p['status'], result)
+    except Exception:
+        # Exceptions may include download URLs or command arguments: never log them.
+        result.update(outcome='failed', reason='Update failed; check connectivity, disk space and service health')
+        try:
+            atomic_json(p['status'], result)
+        except OSError:
+            print('ii-soloist: unable to persist updater status', file=sys.stderr)
+    finally:
+        if stage:
+            stage.cleanup()
+    return result
+
+
+def notify_result(result):
+    text = result.get('reason', result['outcome'])
+    if result['outcome'] in ('failed', 'rolled_back') or result.get('days_remaining', 90) <= 14:
+        if shutil.which('notify-send'):
+            try:
+                subprocess.run(['notify-send', '--app-name=Spotify Sidebar', 'Spotify Soloist update', text + f" (build expires in {result.get('days_remaining', '?')} days)"], timeout=5, capture_output=True)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    print(json.dumps(result))
+
+
+UNITS = ('ii-soloist.service', 'ii-soloist-update.service', 'ii-soloist-update.timer', 'ii-soloist-failure.service')
+
+
+def deploy(home: Path, source: Path):
+    """Copy only this opt-in integration; never pairing, keys or proprietary payloads."""
+    copies = [(source / '.local/bin/ii-soloist', home / '.local/bin/ii-soloist')]
+    copies += [(source / '.config/systemd/user' / unit, home / '.config/systemd/user' / unit) for unit in UNITS]
+    for src, dst in copies:
+        if not src.is_file():
+            raise BackendError('Run setup from this repository or an already deployed integration')
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.resolve() != dst.resolve():
+            with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as f:
+                tmp = Path(f.name)
+                f.write(src.read_bytes())
+            tmp.chmod(0o700 if dst.name == 'ii-soloist' else 0o600)
+            os.replace(tmp, dst)
+
+
+def deploy_sidebar(home: Path, source: Path):
+    """Explicitly install the native tab, with private backups and preserved settings."""
+    config = home / '.config/illogical-impulse/config.json'
+    try:
+        settings = json.loads(config.read_text()) if config.exists() else {}
+        if not isinstance(settings, dict) or not isinstance(settings.get('sidebar', {}), dict):
+            raise ValueError('Invalid settings structure')
+    except (OSError, ValueError):
+        raise BackendError('Cannot safely read shell settings; sidebar deployment refused') from None
+    files = [
+        '.local/bin/ii-spotify-api',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyLogic.js',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyConnection.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/PagedList.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/Spotify.qml',
+        '.config/quickshell/ii/modules/common/Config.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/SidebarLeftContent.qml',
+    ]
+    if any(not (source / name).is_file() for name in files):
+        raise BackendError('Run setup-sidebar from the complete feature checkout')
+    backups = home / '.local/state/spotify-sidebar/backups'
+    backups.mkdir(parents=True, exist_ok=True, mode=0o700)
+    backup = Path(tempfile.mkdtemp(prefix=datetime.now().strftime('%Y%m%d-%H%M%S-'), dir=backups))
+    if config.exists():
+        shutil.copy2(config, backup / 'config.json')
+        (backup / 'config.json').chmod(0o600)
+    for name in files:
+        src, dst = source / name, home / name
+        if src.resolve() == dst.resolve():
+            continue
+        if dst.exists():
+            saved = backup / name
+            saved.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            shutil.copy2(dst, saved)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as f:
+            temp = Path(f.name)
+            f.write(src.read_bytes())
+        temp.chmod(0o700 if name.startswith('.local/bin/') else 0o600)
+        os.replace(temp, dst)
+    settings.setdefault('sidebar', {}).setdefault('spotify', {})['enable'] = True
+    config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_json(config, settings)
+    return backup
+
+
+def ensure_no_unmanaged_daemon(p):
+    pidfile = p['data'] / 'soloist.pid'
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            if pid <= 1:
+                raise BackendError('Invalid Soloist pid file; inspect before setup')
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except (ValueError, PermissionError):
+            raise BackendError('Cannot verify existing Soloist process; inspect before setup') from None
+        raise BackendError('Stop the existing test Soloist process before setup; pairing will be preserved')
+
+
+def setup(home: Path, source: Path):
+    p = paths(home)
+    # Validate credentials before touching units or enabling anything.
+    launch_arguments(p)
+    for name in ('root', 'data', 'cache'):
+        p[name].mkdir(parents=True, exist_ok=True, mode=0o700)
+    # A managed active service is safe; an unmanaged daemon must be explicitly stopped.
+    managed = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', SERVICE], capture_output=True).returncode == 0
+    if not managed:
+        ensure_no_unmanaged_daemon(p)
+    deploy(home, source)
+    command(['systemctl', '--user', 'daemon-reload'])
+    if not p['binary'].exists():
+        result = update(p)
+        if result['outcome'] != 'updated':
+            raise BackendError('Initial Soloist download failed; service was not enabled')
+    command(['systemctl', '--user', 'enable', '--now', SERVICE, 'ii-soloist-update.timer'], timeout=35)
+    print('Soloist service and daily update timer enabled; existing pairing retained')
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['run', 'update', 'setup', 'setup-sidebar', 'notify-failure'])
+    args = parser.parse_args()
+    p = paths(Path.home())
+    os.umask(0o077)
+    if args.command == 'update':
+        result = update(p)
+        notify_result(result)
+        return 1 if result['outcome'] in ('failed', 'rolled_back') else 0
+    try:
+        if args.command == 'notify-failure':
+            notify_result({'outcome': 'failed', 'reason': 'Soloist playback service failed; inspect journalctl --user -u ii-soloist.service'})
+            return 0
+        if args.command in ('setup', 'setup-sidebar'):
+            source = Path(__file__).resolve().parents[2]
+            setup(Path.home(), source)
+            if args.command == 'setup-sidebar':
+                print('Sidebar deployed; private backup:', deploy_sidebar(Path.home(), source))
+            return 0
+        argv = launch_arguments(p)
+        os.execv(argv[0], argv)
+    except BackendError as e:
+        print(f'ii-soloist: {e}', file=sys.stderr)
+        return 1
+    except OSError:
+        print('ii-soloist: unable to execute installed Soloist', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
