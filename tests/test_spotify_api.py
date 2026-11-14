@@ -130,6 +130,46 @@ class ApiTests(unittest.TestCase):
                 self.api.browse('search', query='test')
         self.assertEqual(e.exception.kind, 'rate_limit')
 
+    def test_refresh_429_preserves_authorization_and_blocks_further_token_requests(self):
+        self.token()
+        old=self.api.tokens(); old['expires_at']=0; self.api.write_tokens(old)
+        calls=[]
+        def fail_refresh(url,**kwargs):
+            calls.append(url)
+            raise HTTPError(url,429,'throttled',{'Retry-After':'30'},io.BytesIO(b'{}'))
+        with patch.object(self.api,'http',side_effect=fail_refresh):
+            with self.assertRaises(self.m.ApiError) as first:
+                self.api.browse('library')
+            self.assertEqual(first.exception.kind,'rate_limit')
+            self.assertTrue(self.api.status()['authenticated'])
+            self.assertTrue(self.api.cooldown_path.exists())
+            with self.assertRaises(self.m.ApiError) as second:
+                self.api.browse('library')
+            self.assertEqual(second.exception.kind,'rate_limit')
+            with self.assertRaises(self.m.ApiError):
+                self.api.access_token(force=True)
+        self.assertEqual(len(calls),1)
+        self.assertNotIn('private-',str(first.exception))
+
+    def test_refresh_503_is_temporary_not_revoked_authorization(self):
+        self.token()
+        old=self.api.tokens(); old['expires_at']=0; self.api.write_tokens(old)
+        error=HTTPError('https://accounts.spotify.com/api/token',503,'unavailable',{},io.BytesIO(b'{}'))
+        with patch.object(self.api,'http',side_effect=error):
+            with self.assertRaises(self.m.ApiError) as result:
+                self.api.browse('library')
+        self.assertEqual(result.exception.kind,'temporary')
+        self.assertTrue(self.api.status()['authenticated'])
+        self.assertEqual(self.api.tokens()['refresh_token'],'private-refresh')
+
+    def test_refresh_invalid_grant_is_reported_as_authorization_failure(self):
+        self.token()
+        error=HTTPError('https://accounts.spotify.com/api/token',400,'invalid',{},io.BytesIO(b'{"error":"invalid_grant"}'))
+        with patch.object(self.api,'http',side_effect=error):
+            with self.assertRaises(self.m.ApiError) as result:
+                self.api.access_token(force=True)
+        self.assertEqual(result.exception.kind,'authorization')
+
     def test_401_retries_only_once_and_403_is_actionable(self):
         self.token()
         error = HTTPError('https://api.spotify.com/v1/me/tracks',401,'unauthorized',{},io.BytesIO(b''))

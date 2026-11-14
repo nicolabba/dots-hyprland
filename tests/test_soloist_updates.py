@@ -108,6 +108,63 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.update(FakeService(active=True), fetch)['outcome'], 'deferred')
         self.assertEqual(self.m.read_build(self.p['binary']).timestamp, self.old)
 
+    def test_late_playback_or_stop_during_login_check_defers_update(self):
+        for transition in ('playing', 'stopped'):
+            with self.subTest(transition=transition):
+                self.p['binary'].write_bytes(fake_player(self.old))
+                service=FakeService(active=True)
+                def late_login():
+                    if transition=='playing':
+                        self.p['binary'].write_bytes(fake_player(self.old,'playing'))
+                    else:
+                        service.enabled=False
+                    return True
+                service.logged_in=late_login
+                result=self.update(service)
+                self.assertEqual(result['outcome'],'deferred')
+                self.assertEqual(service.restarts,0)
+                self.assertEqual(self.m.read_build(self.p['binary']).timestamp,self.old)
+
+    def test_playback_during_previous_binary_copy_defers_activation(self):
+        import shutil
+        copy=shutil.copy2
+        def copy_then_play(src,dst):
+            result=copy(src,dst)
+            self.p['binary'].write_bytes(fake_player(self.old,'playing'))
+            return result
+        with patch.object(self.m.shutil,'copy2',side_effect=copy_then_play):
+            result=self.update(FakeService(active=True))
+        self.assertEqual(result['outcome'],'deferred')
+        self.assertEqual(self.m.read_build(self.p['binary']).timestamp,self.old)
+
+    def test_stop_during_candidate_health_check_never_restarts_rollback(self):
+        service=FakeService(active=True)
+        def stop_during_health(require_login):
+            service.restarts+=1
+            service.enabled=False
+            return False
+        service.restart=stop_during_health
+        result=self.update(service)
+        self.assertEqual(service.restarts,1)
+        self.assertEqual(self.m.read_build(self.p['binary']).timestamp,self.old)
+        self.assertEqual(result['outcome'],'rolled_back')
+        self.assertFalse(service.enabled)
+
+    def test_service_restart_uses_atomic_try_restart_not_start(self):
+        calls=[]
+        def command(args,timeout=10):
+            calls.append(args)
+            if args[:3]==['systemctl','--user','try-restart']:
+                return ''
+            if args[:3]==['systemctl','--user','show']:
+                return 'active'
+            if 'ctl' in args:
+                return 'soloist: running (pid 123)\n  logged in: yes'
+            raise AssertionError('Unsafe service activation: '+repr(args))
+        with patch.object(self.m,'command',side_effect=command):
+            self.assertTrue(self.m.Service(self.p).restart(True))
+        self.assertIn(['systemctl','--user','try-restart','ii-soloist.service'],calls)
+
     def test_paused_active_service_is_restarted_and_health_checked(self):
         service = FakeService(active=True)
         self.assertEqual(self.update(service)['outcome'], 'updated')

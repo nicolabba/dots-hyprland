@@ -121,7 +121,8 @@ class Service:
 
     def restart(self, require_login):
         try:
-            command(['systemctl', '--user', 'restart', SERVICE], timeout=35)
+            # systemd checks activity atomically: never start a deliberately stopped unit.
+            command(['systemctl', '--user', 'try-restart', SERVICE], timeout=35)
             deadline = time.monotonic() + 25
             while time.monotonic() < deadline:
                 try:
@@ -229,19 +230,29 @@ def update(p, fetch=download, service=None, now=None):
                 else:
                     logged = service.logged_in() if active else False
                     if current:
-                        # Copy before replace: current pathname is always executable, including on crash.
+                        # Stage the backup before the FINAL safety check: copying may block.
                         shutil.copy2(p['binary'], folder / 'previous')
-                        os.replace(folder / 'previous', p['previous'])
-                    os.replace(candidate, p['binary'])
-                    result.update(outcome='updated', reason='Installed newer official build', days_remaining=math.ceil((build.timestamp + LIFETIME - now.timestamp()) / 86400))
-                    if active and not service.restart(logged):
-                        if current and 0 <= now.timestamp() - current.timestamp < LIFETIME:
-                            shutil.copy2(p['previous'], folder / 'rollback')
-                            os.replace(folder / 'rollback', p['binary'])
-                            ok = service.restart(logged)
-                            result.update(outcome='rolled_back' if ok else 'failed', reason='Candidate failed health check; previous restored' if ok else 'Candidate and rollback health checks failed', days_remaining=max(0, math.ceil((current.timestamp + LIFETIME - now.timestamp()) / 86400)))
-                        else:
-                            result.update(outcome='failed', reason='Candidate failed health check; no unexpired rollback available')
+                    if service.active() != active or (active and playback_state(p['binary'], p['data']) not in ('paused', 'stopped')):
+                        result.update(outcome='deferred', reason='Playback or service state changed during final preparation')
+                    else:
+                        if current:
+                            os.replace(folder / 'previous', p['previous'])
+                        os.replace(candidate, p['binary'])
+                        result.update(outcome='updated', reason='Installed newer official build', days_remaining=math.ceil((build.timestamp + LIFETIME - now.timestamp()) / 86400))
+                        if active and not service.restart(logged):
+                            if current and 0 <= now.timestamp() - current.timestamp < LIFETIME:
+                                shutil.copy2(p['previous'], folder / 'rollback')
+                                # Restore the on-disk binary without touching any running audio.
+                                os.replace(folder / 'rollback', p['binary'])
+                                recovery_safe = service.active() and playback_state(p['binary'], p['data']) in ('paused', 'stopped')
+                                if recovery_safe:
+                                    ok = service.restart(logged)
+                                    result.update(outcome='rolled_back' if ok else 'failed', reason='Candidate failed health check; previous restored' if ok else 'Candidate and rollback health checks failed')
+                                else:
+                                    result.update(outcome='rolled_back', reason='Previous binary restored; recovery restart deferred to preserve stopped service or playback')
+                                result['days_remaining'] = max(0, math.ceil((current.timestamp + LIFETIME - now.timestamp()) / 86400))
+                            else:
+                                result.update(outcome='failed', reason='Candidate failed health check; no unexpired rollback available')
             atomic_json(p['status'], result)
     except Exception:
         # Exceptions may include download URLs or command arguments: never log them.

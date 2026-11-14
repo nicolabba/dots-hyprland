@@ -155,10 +155,49 @@ class Api:
                 raise ApiError('Spotify response is too large')
             return json.loads(content)
 
+    def check_cooldown(self):
+        try:
+            data=json.loads(self.cooldown_path.read_text())
+            remaining=data.get('until',0)-time.time()
+        except (OSError,ValueError,AttributeError,TypeError):
+            return
+        if remaining>0:
+            kind=data.get('kind','rate_limit')
+            message='Spotify is temporarily unavailable; try again later' if kind=='temporary' else 'Spotify is rate limiting requests; try again later'
+            raise ApiError(message,kind,max(1,int(remaining)))
+
+    def retry_error(self,error,kind='rate_limit'):
+        try:
+            delay=max(1,min(86400,int(error.headers.get('Retry-After','60'))))
+        except (ValueError,TypeError):
+            delay=60
+        private_json(self.cooldown_path,{'until':time.time()+delay,'kind':kind})
+        message='Spotify is temporarily unavailable; try again later' if kind=='temporary' else 'Spotify is rate limiting requests; try again later'
+        return ApiError(message,kind,delay)
+
+    def refresh_error(self,error):
+        if error.code==429:
+            return self.retry_error(error)
+        if 500<=error.code<600:
+            if error.headers.get('Retry-After'):
+                return self.retry_error(error,'temporary')
+            return ApiError('Spotify is temporarily unavailable; your library connection is retained', 'temporary')
+        code=''
+        if error.code==400:
+            try:
+                code=json.loads(error.read(4096)).get('error','')
+            except (ValueError,AttributeError):
+                pass
+        if error.code==401 or code in ('invalid_grant','invalid_client','unauthorized_client'):
+            return ApiError('Spotify authorization expired or was revoked; connect again', 'authorization')
+        return ApiError('Spotify could not refresh access; check application permissions and retry', 'permission' if error.code==403 else 'api')
+
     def access_token(self, force=False):
+        self.check_cooldown()
         self.folder.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (self.folder / 'web-api.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            self.check_cooldown()
             old = self.tokens()
             if not old.get('refresh_token'):
                 raise ApiError('Connect your Spotify library first', 'authorization')
@@ -170,8 +209,11 @@ class Api:
                 self.store_tokens(response,old)
                 return response['access_token']
             except urllib.error.HTTPError as error:
-                error.close()
-                raise ApiError('Spotify authorization expired or was revoked; connect again', 'authorization') from None
+                try:
+                    failure=self.refresh_error(error)
+                finally:
+                    error.close()
+                raise failure from None
 
     def status(self):
         tokens = self.tokens()
@@ -227,12 +269,7 @@ class Api:
         raise result.get('error') or ApiError('Spotify authorization timed out', 'authorization')
 
     def get(self,path,params):
-        try:
-            cooldown = json.loads(self.cooldown_path.read_text()).get('until',0)
-        except (OSError,ValueError,AttributeError):
-            cooldown = 0
-        if cooldown > time.time():
-            raise ApiError('Spotify is rate limiting requests; try again later', 'rate_limit',max(1,int(cooldown-time.time())))
+        self.check_cooldown()
         url = 'https://api.spotify.com/v1/' + path + '?' + urllib.parse.urlencode(params)
         for attempt in range(2):
             token = self.access_token(force=attempt>0)
@@ -247,12 +284,7 @@ class Api:
                 if e.code==403:
                     raise ApiError('Spotify denied this request. Check app access, allowed users and library permissions.', 'permission') from None
                 if e.code==429:
-                    try:
-                        delay = max(1,min(86400,int(e.headers.get('Retry-After','60'))))
-                    except (ValueError,TypeError):
-                        delay=60
-                    private_json(self.cooldown_path,{'until':time.time()+delay})
-                    raise ApiError('Spotify is rate limiting requests; try again later', 'rate_limit',delay) from None
+                    raise self.retry_error(e) from None
                 raise ApiError('Spotify could not provide these items', 'api') from None
         raise ApiError('Spotify authorization failed', 'authorization')
 
