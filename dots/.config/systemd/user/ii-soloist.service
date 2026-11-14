@@ -1,0 +1,21 @@
+[Unit]
+Description=Spotify Sidebar headless playback (Soloist)
+PartOf=graphical-session.target
+After=graphical-session.target pipewire.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+OnFailure=ii-soloist-failure.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ii-soloist run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=graphical-session.target

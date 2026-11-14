@@ -267,9 +267,63 @@ def notify_result(result):
     print(json.dumps(result))
 
 
+UNITS = ('ii-soloist.service', 'ii-soloist-update.service', 'ii-soloist-update.timer', 'ii-soloist-failure.service')
+
+
+def deploy(home: Path, source: Path):
+    """Copy only this opt-in integration; never pairing, keys or proprietary payloads."""
+    copies = [(source / '.local/bin/ii-soloist', home / '.local/bin/ii-soloist')]
+    copies += [(source / '.config/systemd/user' / unit, home / '.config/systemd/user' / unit) for unit in UNITS]
+    for src, dst in copies:
+        if not src.is_file():
+            raise BackendError('Run setup from this repository or an already deployed integration')
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.resolve() != dst.resolve():
+            with tempfile.NamedTemporaryFile(dir=dst.parent, delete=False) as f:
+                tmp = Path(f.name)
+                f.write(src.read_bytes())
+            tmp.chmod(0o700 if dst.name == 'ii-soloist' else 0o600)
+            os.replace(tmp, dst)
+
+
+def ensure_no_unmanaged_daemon(p):
+    pidfile = p['data'] / 'soloist.pid'
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text().strip())
+            if pid <= 1:
+                raise BackendError('Invalid Soloist pid file; inspect before setup')
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        except (ValueError, PermissionError):
+            raise BackendError('Cannot verify existing Soloist process; inspect before setup') from None
+        raise BackendError('Stop the existing test Soloist process before setup; pairing will be preserved')
+
+
+def setup(home: Path, source: Path):
+    p = paths(home)
+    # Validate credentials before touching units or enabling anything.
+    launch_arguments(p)
+    for name in ('root', 'data', 'cache'):
+        p[name].mkdir(parents=True, exist_ok=True, mode=0o700)
+    # A managed active service is safe; an unmanaged daemon must be explicitly stopped.
+    managed = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', SERVICE], capture_output=True).returncode == 0
+    if not managed:
+        ensure_no_unmanaged_daemon(p)
+    deploy(home, source)
+    command(['systemctl', '--user', 'daemon-reload'])
+    if not p['binary'].exists():
+        result = update(p)
+        if result['outcome'] != 'updated':
+            raise BackendError('Initial Soloist download failed; service was not enabled')
+    command(['systemctl', '--user', 'enable', '--now', SERVICE, 'ii-soloist-update.timer'], timeout=35)
+    print('Soloist service and daily update timer enabled; existing pairing retained')
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'update'])
+    parser.add_argument('command', choices=['run', 'update', 'setup', 'notify-failure'])
     args = parser.parse_args()
     p = paths(Path.home())
     os.umask(0o077)
@@ -278,6 +332,12 @@ def main() -> int:
         notify_result(result)
         return 1 if result['outcome'] in ('failed', 'rolled_back') else 0
     try:
+        if args.command == 'notify-failure':
+            notify_result({'outcome': 'failed', 'reason': 'Soloist playback service failed; inspect journalctl --user -u ii-soloist.service'})
+            return 0
+        if args.command == 'setup':
+            setup(Path.home(), Path(__file__).resolve().parents[2])
+            return 0
         argv = launch_arguments(p)
         os.execv(argv[0], argv)
     except BackendError as e:

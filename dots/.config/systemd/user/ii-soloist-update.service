@@ -1,0 +1,10 @@
+[Unit]
+Description=Update official Spotify Soloist build when idle
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ii-soloist update
+TimeoutStartSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Spotify Soloist build check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=ii-soloist-update.service
+
+[Install]
+WantedBy=timers.target
