@@ -8,6 +8,8 @@ OnFailure=ii-soloist-failure.service
 
 [Service]
 Type=simple
+ExecStartPre=%h/.local/bin/ii-soloist wait-network
+TimeoutStartSec=75
 ExecStart=%h/.local/bin/ii-soloist run
 Restart=on-failure
 RestartSec=5

@@ -378,9 +378,34 @@ def setup(home: Path, source: Path):
     print('Soloist service and daily update timer enabled; existing pairing retained')
 
 
+def network_ready() -> bool:
+    """Check DNS/TLS routing to Spotify without sending keys or session data."""
+    request = urllib.request.Request('https://accounts.spotify.com/api/token', method='HEAD')
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return 200 <= response.status < 500
+    except urllib.error.HTTPError as error:
+        # A method/auth rejection still proves DNS, routing and TLS are working.
+        ready = 400 <= error.code < 500
+        error.close()
+        return ready
+    except (OSError, ValueError):
+        return False
+
+
+def wait_network(probe=None, timeout=60):
+    probe = probe or network_ready
+    deadline = time.monotonic() + timeout
+    while not probe():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackendError('Spotify network is not ready; systemd will retry without changing pairing')
+        time.sleep(min(2, remaining))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['run', 'update', 'setup', 'setup-sidebar', 'notify-failure'])
+    parser.add_argument('command', choices=['run', 'wait-network', 'update', 'setup', 'setup-sidebar', 'notify-failure'])
     args = parser.parse_args()
     p = paths(Path.home())
     os.umask(0o077)
@@ -389,6 +414,10 @@ def main() -> int:
         notify_result(result)
         return 1 if result['outcome'] in ('failed', 'rolled_back') else 0
     try:
+        if args.command == 'wait-network':
+            wait_network()
+            print('Spotify network endpoint reachable; starting playback backend')
+            return 0
         if args.command == 'notify-failure':
             notify_result({'outcome': 'failed', 'reason': 'Soloist playback service failed; inspect journalctl --user -u ii-soloist.service'})
             return 0
