@@ -288,6 +288,21 @@ class Api:
                 raise ApiError('Spotify could not provide these items', 'api') from None
         raise ApiError('Spotify authorization failed', 'authorization')
 
+    def liked_context(self):
+        profile = self.get('me', {})
+        user_id = profile.get('id') if isinstance(profile, dict) else None
+        if not isinstance(user_id, str) or not re.fullmatch(r'[A-Za-z0-9._~-]+', user_id):
+            raise ApiError('Spotify did not provide a supported account ID for Liked Songs')
+        # Ask only for the count. Soloist resolves and plays the full collection,
+        # including libraries spanning many API pages or unavailable first items.
+        page = self.get('me/tracks', {'limit':1, 'offset':0})
+        total = page.get('total') if isinstance(page, dict) else None
+        if type(total) is not int or total < 0:
+            raise ApiError('Spotify could not confirm your Liked Songs library')
+        if total == 0:
+            raise ApiError('Your Liked Songs library is empty', 'empty')
+        return {'uri':'spotify:user:' + user_id + ':collection', 'total':total}
+
     def browse(self,operation,kind='tracks',query='',entity_id='',offset=0):
         if offset<0 or offset>100000:
             raise ApiError('Invalid page offset')
@@ -326,7 +341,7 @@ class Api:
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation',choices=['status','authorize','library','search','playlist','album'])
+    parser.add_argument('operation',choices=['status','authorize','library','search','playlist','album','liked-context'])
     parser.add_argument('--kind',default='tracks')
     parser.add_argument('--query',default='')
     parser.add_argument('--id',default='')
@@ -339,6 +354,8 @@ def main():
             result=api.status()
         elif args.operation=='authorize':
             result=api.authorize()
+        elif args.operation=='liked-context':
+            result=api.liked_context()
         else:
             result=api.browse(args.operation,kind=args.kind,query=args.query,entity_id=args.id,offset=args.offset)
         print(json.dumps(result))

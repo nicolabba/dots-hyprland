@@ -41,6 +41,26 @@ class ApiTests(unittest.TestCase):
     def token(self, **fields):
         self.api.store_tokens(dict(access_token='private-access', refresh_token='private-refresh', expires_in=3600, **fields))
 
+    def test_liked_context_uses_native_collection_without_enumerating_library(self):
+        # The first saved entry may be unavailable; context playback resolves it.
+        with patch.object(self.api, 'get', side_effect=[{'id':'user.name-123'}, {'total':3800,'items':[{'track':None}], 'next':'more'}]) as get:
+            self.assertEqual(self.api.liked_context(), {'uri':'spotify:user:user.name-123:collection','total':3800})
+        self.assertEqual(get.call_args_list[0].args, ('me', {}))
+        self.assertEqual(get.call_args_list[1].args, ('me/tracks', {'limit':1,'offset':0}))
+        self.assertEqual(get.call_count,2)
+        self.assertEqual(self.m.SCOPES, 'user-library-read playlist-read-private playlist-read-collaborative')
+
+    def test_liked_context_rejects_empty_library_bad_ids_and_partial_failures(self):
+        for uid in ['',None,'name:collection','name/other',' name ','name%3Aother']:
+            with self.subTest(uid=uid), patch.object(self.api,'get',return_value={'id':uid}):
+                with self.assertRaises(self.m.ApiError): self.api.liked_context()
+        for page in [{'total':0},{}, {'total':'3800'},{'total':-1}]:
+            with self.subTest(page=page), patch.object(self.api,'get',side_effect=[{'id':'valid'},page]):
+                with self.assertRaises(self.m.ApiError): self.api.liked_context()
+        with patch.object(self.api,'get',side_effect=[{'id':'valid'},self.m.ApiError('rate limited','rate_limit',30)]):
+            with self.assertRaises(self.m.ApiError) as error: self.api.liked_context()
+        self.assertEqual(error.exception.kind,'rate_limit')
+
     def test_client_id_format_is_validated_without_repair(self):
         (self.folder / 'client-id').write_text('not-a-client-id')
         with self.assertRaises(self.m.ApiError):

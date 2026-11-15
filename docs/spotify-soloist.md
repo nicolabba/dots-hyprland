@@ -78,6 +78,14 @@ Create your own Web API app in Spotify Developer Dashboard and register `http://
 
 `ii-spotify-api status` reports authorization status without displaying tokens. Library/search results are read through the official Web API, with bounded requests, token refresh and persisted rate-limit cooldown. Spotify may restrict playlist items or developer-mode access; such failures are displayed rather than replaced with fabricated content. Changing the Client ID requires reauthorization.
 
+## Liked Songs and playback position
+
+In **Library → Liked**, **Play Liked Songs** starts the account's native `spotify:user:<id>:collection` context on Soloist. The helper resolves the authenticated account and checks the saved-track count with two bounded read-only requests; it does not download the full library, assemble a partial queue, create a playlist or request extra scopes. Soloist handles collection continuation, unavailable entries and the existing shuffle/repeat controls. Empty libraries, authorization/API failures and rate-limit cooldowns are shown beside the action. Collection requests are independent of library/search pagination and are cancelled logically on disconnect.
+
+The seek bar uses an unanimated millisecond value rather than the shared slider's smoothed animation. Dragging previews the selected time, releasing sends one clamped seek, and arrow keys seek by five seconds. The preview waits for an authoritative position event, an error or a bounded reconciliation timeout. Changing tracks or losing seek permission cancels an in-progress drag. Playback anchors are refreshed on pause/buffer/resume and reset on track changes; missing or implausible timestamps are anchored at receipt. Progress still uses the existing local 500 ms clock, never per-tick Web API calls.
+
+Personalized mixes/radios are not part of this enhancement. No private web-client credentials or unsupported discovery feed is introduced.
+
 ## Verification
 
 ```sh

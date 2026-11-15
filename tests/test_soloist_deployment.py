@@ -74,6 +74,8 @@ class DeploymentTests(unittest.TestCase):
             self.assertTrue(settings['sidebar']['spotify']['enable'])
             self.assertTrue((home / '.local/bin/ii-spotify-api').exists())
             self.assertTrue((home / '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyConnection.qml').exists())
+            seek = '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifySeek.qml'
+            self.assertEqual((home / seek).read_bytes(), (ROOT / 'dots' / seek).read_bytes())
             m.deploy_sidebar(home, ROOT / 'dots')
 
     def test_safe_setup_rejects_unmanaged_running_player(self):
