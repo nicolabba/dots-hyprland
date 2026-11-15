@@ -40,7 +40,7 @@ class LogicTests(unittest.TestCase):
 
     def test_reduce_real_soloist_events_and_clear_auth_state(self):
         result=self.evaluate('''let s=initial(); s=reduce(s,{type:'auth_state',logged_in:true,is_active:true});
-s=reduce(s,{type:'playback_state',status:'playing',item:{uri:'spotify:track:abc',decorations:{identity:{name:'Song'},creators:[{entity:{decorations:{identity:{name:'Artist'}}}}],playback:{duration_ms:10000}}},position:{position_ms:2000,timestamp_ms:1000,speed:1},available_actions:{pause:{}}});
+s=reduce(s,{type:'playback_state',status:'playing',item:{uri:'spotify:track:abc',decorations:{identity:{name:'Song'},creators:[{entity:{decorations:{identity:{name:'Artist'}}}}],playback:{duration_ms:10000}}},position:{position_ms:2000,timestamp_ms:1000,speed:1},available_actions:{pause:{}}},1000);
 if (entity(s.item).title!=='Song'||entity(s.item).subtitle!=='Artist'||position(s,4000)!==5000) throw Error('Bad state');
 s=reduce(s,{type:'volume_changed',volume:40}); if(s.volume!==40) throw Error('Volume lost');
 s=reduce(s,{type:'queue_changed',upcoming:[{item:{uri:'spotify:track:def',decorations:{identity:{name:'Next'}}}}]});
@@ -59,11 +59,41 @@ s.actions={skip_next:{}};if(!allowed(s,'skip_next'))throw Error('Available actio
 if(!isCurrent(3,3)||isCurrent(2,3))throw Error('Stale search accepted'); console.log('ok');''')
         self.assertEqual(result,'ok')
 
+    def test_playback_transitions_freeze_and_reanchor_without_pause_gaps(self):
+        result=self.evaluate('''let s=initial();
+s=reduce(s,{type:'playback_state',status:'playing',item:{uri:'spotify:track:a',decorations:{playback:{duration_ms:100000}}},position:{position_ms:2000,timestamp_ms:1000,speed:1}},1000);
+s=reduce(s,{type:'playback_changed',status:'paused'},4000);
+if(position(s,9000)!==5000)throw Error('Pause jumped backwards');
+s=reduce(s,{type:'playback_changed',status:'playing'},10000);
+if(position(s,11000)!==6000)throw Error('Pause gap counted');
+s=reduce(s,{type:'playback_changed',status:'buffering'},11000);
+if(position(s,20000)!==6000)throw Error('Buffering advanced');
+s=reduce(s,{type:'track_changed',item:{uri:'spotify:track:b',decorations:{playback:{duration_ms:30000}}}},21000);
+if(position(s,21000)!==0)throw Error('Old track position retained');console.log('ok');''')
+        self.assertEqual(result,'ok')
+
+    def test_position_anchors_handle_missing_stale_future_and_out_of_order_timestamps(self):
+        result=self.evaluate('''const item={uri:'spotify:track:a',decorations:{playback:{duration_ms:100000}}};
+for(const timestamp of [undefined,0,999999999,NaN]) {
+let s=reduce(initial(),{type:'playback_state',status:'playing',item:item,position:{position_ms:2000,timestamp_ms:timestamp,speed:1}},100000);
+if(position(s,101000)!==3000)throw Error('Unusable timestamp not reanchored '+timestamp);
+}
+let s=reduce(initial(),{type:'playback_state',status:'playing',item:item,position:{position_ms:2000,timestamp_ms:100000,speed:1}},100000);
+s=reduce(s,{type:'position_sync',position:{position_ms:1000,timestamp_ms:99000,speed:1}},100100);
+if(position(s,101000)!==3000)throw Error('Out-of-order sync accepted');
+for(const v of [Infinity,-Infinity,NaN])if(!Number.isFinite(clampSeek(v,10000)))throw Error('Non-finite seek');console.log('ok');''')
+        self.assertEqual(result,'ok')
+
     def test_infinite_paging_waits_for_capacity_and_stops_on_errors(self):
         result=self.evaluate('''const base={active:true,authorized:true,busy:false,blocked:false,next:10,contentY:600,originY:0,contentHeight:1000,height:300};
 if(!shouldFetchNext(base))throw Error('Near-end page not fetched');
 for(const change of [{active:false},{authorized:false},{busy:true},{blocked:true},{next:null},{height:0},{contentY:0}])if(shouldFetchNext(Object.assign({},base,change)))throw Error('Unexpected fetch '+JSON.stringify(change));
 if(!shouldFetchNext(Object.assign({},base,{contentY:0,contentHeight:100})))throw Error('Underfilled viewport not filled');console.log('ok');''')
+        self.assertEqual(result,'ok')
+
+    def test_playable_uris_allow_only_native_collections_and_existing_content(self):
+        result=self.evaluate('''for (const uri of ['spotify:user:user.name-123:collection','spotify:playlist:abc','spotify:track:123']) if(!playableUri(uri))throw Error('Valid URI rejected');
+for(const uri of ['spotify:collection:tracks','spotify:user::collection','spotify:user:abc:collection:tracks','spotify:user:abc/def:collection','https://open.spotify.com/track/123','spotify:artist:abc'])if(playableUri(uri))throw Error('Unsafe URI accepted');console.log('ok');''')
         self.assertEqual(result,'ok')
 
     def test_port_discovery_rejects_nonlocal_or_invalid_endpoints(self):

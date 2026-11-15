@@ -18,6 +18,7 @@ Scope {
     readonly property var queue: state.queue
     property double clock: Date.now()
     readonly property double position: connected ? Logic.position(state, clock) : 0
+    property int positionRevision: 0
     property string endpointUrl: ""
     property string controlError: ""
     property string browseError: ""
@@ -29,13 +30,31 @@ Scope {
     readonly property bool busy: apiProc.running || queuedRequest !== null
     readonly property bool authorizing: authProc.running
     property int retryAfter: 0
+    readonly property bool likedBusy: likedProc.running
+    property string likedError: ""
+    property int likedRetryAfter: 0
+    property int likedGeneration: 0
+    onLoggedInChanged: if (!loggedIn) likedGeneration += 1
+
+    function playLiked() {
+        if (!loggedIn || likedBusy || likedRetryAfter > 0) return;
+        likedError = "";
+        likedGeneration += 1;
+        likedProc.requestGeneration = likedGeneration;
+        likedProc.running = true;
+    }
 
     function can(command) { return connected && Logic.allowed(state, command); }
     function send(command, fields) {
         fields = fields || {};
         // Starting an explicit playable URI is allowed independently of current-track actions.
-        const explicitPlay = command === "play" && /^spotify:(track|album|playlist|episode):[A-Za-z0-9]+$/.test(fields.uri || "");
+        const explicitPlay = command === "play" && Logic.playableUri(fields.uri);
+        if (command === "play" && fields.uri !== undefined && !explicitPlay) return false;
         if (!connected || !loggedIn || (!explicitPlay && !Logic.allowed(state, command))) return false;
+        if (command === "seek") {
+            if (!Number.isFinite(fields.position_ms) || current.duration <= 0) return false;
+            fields = Object.assign({}, fields, {position_ms: Math.round(Logic.clampSeek(fields.position_ms, current.duration))});
+        }
         controlError = "";
         socket.sendTextMessage(JSON.stringify(Object.assign({type: "command", command: command}, fields)));
         return true;
@@ -52,8 +71,12 @@ Scope {
         try { event = JSON.parse(message); } catch (_) { controlError = "Invalid playback update"; return; }
         if (!event || typeof event !== "object") return;
         if (event.type === "error") { controlError = String(event.message || "Playback command failed"); return; }
-        state = Logic.reduce(state, event);
-        clock = Date.now();
+        const receivedAt = Date.now();
+        const next = Logic.reduce(state, event, receivedAt);
+        const anchorChanged = next.position !== state.position;
+        state = next;
+        clock = receivedAt;
+        if (anchorChanged && ["playback_state", "position_sync"].indexOf(event.type) >= 0) positionRevision += 1;
         if (event.type === "auth_state" && event.logged_in) {
             send("get_state"); send("get_queue", {limit: 0});
         } else if (["track_changed", "playback_changed", "device_changed"].indexOf(event.type) >= 0 && loggedIn) {
@@ -111,6 +134,7 @@ Scope {
     Timer { interval: 3000; repeat: true; running: root.connectEnabled; triggeredOnStart: true; onTriggered: root.discover() }
     Timer { interval: 500; repeat: true; running: root.connected && root.state.status === "playing"; onTriggered: root.clock = Date.now() }
     Timer { interval: 1000; repeat: true; running: root.retryAfter > 0; onTriggered: root.retryAfter -= 1 }
+    Timer { interval: 1000; repeat: true; running: root.likedRetryAfter > 0; onTriggered: root.likedRetryAfter -= 1 }
     WebSocket {
         id: socket
         url: root.endpointUrl
@@ -144,6 +168,27 @@ Scope {
                 } catch (_) { root.browseError = "Unable to load Spotify items. Check the installed API helper."; }
             }
             Qt.callLater(root.startNext);
+        }
+    }
+    Process {
+        id: likedProc
+        property int requestGeneration: 0
+        command: [root.helper, "liked-context"]
+        stdout: StdioCollector { id: likedOutput }
+        onExited: (code, status) => {
+            if (requestGeneration !== root.likedGeneration || !root.loggedIn) return;
+            try {
+                const result = JSON.parse(likedOutput.text);
+                if (result.error) {
+                    root.likedError = String(result.error);
+                    root.likedRetryAfter = Math.max(0, Number(result.retry_after) || 0);
+                    if (result.kind === "authorization" || result.kind === "setup") root.authorized = false;
+                } else if (code !== 0 || !/^spotify:user:[A-Za-z0-9._~-]+:collection$/.test(result.uri || "") || !(result.total > 0)) {
+                    root.likedError = "Spotify could not confirm your Liked Songs library.";
+                } else if (!root.send("play", {uri: result.uri})) {
+                    root.likedError = "Unable to start Liked Songs. Check the Soloist connection.";
+                }
+            } catch (_) { root.likedError = "Unable to load Liked Songs. Check the installed API helper."; }
         }
     }
     Process {

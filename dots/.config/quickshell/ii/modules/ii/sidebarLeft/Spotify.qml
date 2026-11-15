@@ -143,20 +143,24 @@ Item {
                     StyledText { Layout.fillWidth: true; text: backend.connected ? backend.current.title : "Spotify is offline"; font.pixelSize: 21; font.bold: true; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight }
                     StyledText { Layout.fillWidth: true; text: backend.current.subtitle; horizontalAlignment: Text.AlignHCenter; color: Appearance.colors.colSubtext; elide: Text.ElideRight }
                     StyledText { Layout.fillWidth: true; text: backend.state.status === "buffering" ? "Buffering…" : ""; visible: !!text; color: Appearance.colors.colSubtext; horizontalAlignment: Text.AlignHCenter }
-                    StyledSlider {
+                    Backend.SpotifySeek {
                         id: seek
+                        objectName: "spotifySeek"
                         Layout.fillWidth: true
-                        from: 0; to: Math.max(1, backend.current.duration)
-                        enabled: backend.can("seek") && backend.current.duration > 0
-                        value: backend.position
-                        usePercentTooltip: false
-                        tooltipContent: Logic.formatTime(value)
-                        onPressedChanged: if (!pressed) backend.send("seek", {position_ms: Math.round(Logic.clampSeek(value, backend.current.duration))})
-                        Binding { target: seek; property: "value"; value: backend.position; when: !seek.pressed; restoreMode: Binding.RestoreBindingOrValue }
+                        durationMs: backend.current.duration
+                        positionMs: backend.position
+                        trackUri: backend.current.uri
+                        positionRevision: backend.positionRevision
+                        canSeek: backend.can("seek")
+                        highlightColor: Appearance.colors.colPrimary
+                        trackColor: Appearance.colors.colSecondaryContainer
+                        handleColor: Appearance.colors.colPrimary
+                        onSeekRequested: positionMs => { if (!backend.send("seek", {position_ms: positionMs})) cancelPending(); }
+                        Connections { target: backend; function onControlErrorChanged() { if (backend.controlError) seek.cancelPending(); } }
                     }
                     RowLayout {
                         Layout.fillWidth: true
-                        StyledText { text: Logic.formatTime(seek.pressed ? seek.value : backend.position); font.pixelSize: 12; color: Appearance.colors.colSubtext }
+                        StyledText { objectName: "spotifyElapsed"; text: Logic.formatTime(seek.displayPosition); font.pixelSize: 12; color: Appearance.colors.colSubtext }
                         Item { Layout.fillWidth: true }
                         StyledText { text: Logic.formatTime(backend.current.duration); font.pixelSize: 12; color: Appearance.colors.colSubtext }
                     }
@@ -237,6 +241,20 @@ Item {
                     IconToolbarButton { Layout.fillHeight: false; implicitWidth: 36; implicitHeight: 36; text: "arrow_back"; onClicked: { root.detailId = ""; root.detailTitle = ""; root.loadCurrent(0, false); } }
                     StyledText { Layout.fillWidth: true; text: root.detailTitle; elide: Text.ElideRight; font.bold: true }
                     IconToolbarButton { Layout.fillHeight: false; implicitWidth: 36; implicitHeight: 36; text: "play_arrow"; enabled: backend.loggedIn; onClicked: backend.send("play", {uri: "spotify:" + root.detailKind + ":" + root.detailId}) }
+                }
+                Chip {
+                    objectName: "spotifyPlayLiked"
+                    visible: root.libraryKind === "tracks" && !search.text.trim() && !root.detailId
+                    Layout.fillWidth: true
+                    buttonText: backend.likedBusy ? "Opening Liked Songs…" : "▶  Play Liked Songs"
+                    enabled: backend.loggedIn && backend.authorized && !backend.likedBusy && backend.likedRetryAfter <= 0
+                    onClicked: backend.playLiked()
+                }
+                StyledText {
+                    visible: !!backend.likedError && root.libraryKind === "tracks" && !search.text.trim() && !root.detailId
+                    Layout.fillWidth: true
+                    text: backend.likedError + (backend.likedRetryAfter > 0 ? " Retry in " + backend.likedRetryAfter + "s." : "")
+                    wrapMode: Text.WordWrap; font.pixelSize: 13; color: Appearance.colors.colSubtext
                 }
                 Chip { visible: !backend.authorized; Layout.fillWidth: true; buttonText: backend.authorizing ? "Waiting for Spotify authorization…" : "Connect library"; enabled: !backend.authorizing; onClicked: backend.authorize() }
                 StyledText { visible: !!backend.browseError; Layout.fillWidth: true; text: backend.browseError + (backend.retryAfter > 0 ? " Retry in " + backend.retryAfter + "s." : ""); wrapMode: Text.WordWrap; font.pixelSize: 13; color: Appearance.colors.colSubtext }

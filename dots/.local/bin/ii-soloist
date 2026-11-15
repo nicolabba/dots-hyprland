@@ -311,6 +311,7 @@ def deploy_sidebar(home: Path, source: Path):
         '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyLogic.js',
         '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifyConnection.qml',
         '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/PagedList.qml',
+        '.config/quickshell/ii/modules/ii/sidebarLeft/spotify/SpotifySeek.qml',
         '.config/quickshell/ii/modules/ii/sidebarLeft/Spotify.qml',
         '.config/quickshell/ii/modules/common/Config.qml',
         '.config/quickshell/ii/modules/ii/sidebarLeft/SidebarLeftContent.qml',
